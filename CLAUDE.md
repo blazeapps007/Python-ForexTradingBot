@@ -12,7 +12,7 @@ A Forex trading project built against the OANDA v20 REST API (practice endpoint 
 | `TradingBotStarter/` | Live trading bot: moving-average crossover on M1 candles, places real orders on the practice account |
 | `WebDashStarter/` | Flask and Vue 2 dashboard showing indicator and candle-pattern KPIs for 21 pairs |
 
-There are no tests, linters or build steps.
+There are no tests, linters or build steps. `README.md` covers the strategy rules, recorded backtest results, the OANDA endpoints and step-by-step extension guides in detail. Keep it in sync when behaviour changes.
 
 ## Environment
 
@@ -53,6 +53,7 @@ Every script uses paths relative to the current directory (`his_data/`, `instrum
 ## Data flow (root)
 
 `instrument.ipynb` / `OandaAPI.save_instruments()` → `instruments.pkl` → `collect_his_data.py` → `his_data/*.pkl` → `ma_sim.py` / `inside_bar_sim.py` / notebooks.
+The current `his_data/*.pkl` files store `time` as tz-aware datetimes (since commit #45). `ma_sim.py`, `candle_plot.ipynb` and `inside_bar_timings*.ipynb` predate that change and call `dateutil.parse()` on `time`, which fails on these files. `inside_bar_sim.py` works with the current format.
 `inside_bar_explore*.ipynb` writes `USD_JPY_H4_trades.pkl`, which `inside_bar_timings*.ipynb` reads. `ma_sim_explorer.ipynb` and `candle_plot.ipynb` read the `ma_sim` output pickles. The `*_spread` notebook variants use bid/ask prices instead of mid.
 
 ## Live bot architecture (TradingBotStarter)
@@ -75,3 +76,4 @@ Quirks in `TradingBotStarter/oanda_api.py` that affect behaviour:
 - `app.py` serves three things: `GET /kpi_data` returns `data.json` as written; `GET /price_data/<pair>` returns 50 live M5 candles as column lists for Plotly; and WhiteNoise serves `static/`.
 - `static/app.js` is a Vue 2 app with Plotly, both loaded from CDN with no build step. It polls `/kpi_data` every 15 seconds and draws a candlestick chart when you click a row. The column names in `DF_COLS` must match the `item.<FIELD>` bindings in `static/index.html`.
 - `static/data.json` is an empty, unused file. The live file is `WebDashStarter/data.json`.
+- The candle-pattern fields are booleans, but `index.html` binds them through `applyDirectionClass()`, which only matches `1`/`-1`. As a result those cells never highlight; `applyOnOffClass()` exists in `app.js` but is unused.
