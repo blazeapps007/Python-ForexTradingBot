@@ -1,0 +1,27 @@
+name: trading-bot
+
+x-bot: &bot
+  build: ./TradingBotStarter
+  image: trading-bot:dev
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    LOG_DIR: /app/logs
+
+services:
+  # the trading bot; paper mode unless TRADING_MODE=broker is set in .env
+  bot:
+    <<: *bot
+    volumes:
+      - ./TradingBotStarter/logs:/app/logs
+    restart: "no"
+
+  # unit tests: docker compose run --rm tests
+  # integration tests: docker compose run --rm tests pytest -m integration
+  tests:
+    <<: *bot
+    command: ["pytest"]
+    volumes:
+      - ./TradingBotStarter:/app
+    profiles: ["test"]

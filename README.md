@@ -1,8 +1,13 @@
 # Python Forex Trading Bot
 
-This project uses several tools to build an automated Forex trading strategy. It backtests strategies on real historical Forex data, monitors the market through a live indicator dashboard, and runs a bot that places trades automatically through the OANDA broker API.
+This project uses several tools to build an automated trading strategy. It backtests strategies on real historical Forex data, monitors the market through a live indicator dashboard, and runs a bot that trades automatically:
+- Forex through **OANDA**;
+- crypto and **bStocks** (Binance's tokenized US stocks) through **Binance spot**;
+- crypto perpetuals through **Binance USDⓈ-M futures**.
 
-> **Warning:** the live bot sends real market orders to whichever OANDA account is set in `TradingBotStarter/defs.py`. It has no stop loss, take profit or risk controls. Run it on a **practice** account.
+Every bot trade carries a stop loss and a take profit, and its size is set by the share of the balance you're willing to risk.
+
+> **Warning:** the bot runs in **paper mode** by default, which simulates orders on live prices. With `TRADING_MODE=broker` it sends real orders to the environments set in `.env`. Use OANDA practice and Binance testnet accounts. Live accounts are refused unless `ALLOW_REAL_MONEY=yes` is set.
 
 ---
 
@@ -11,10 +16,10 @@ This project uses several tools to build an automated Forex trading strategy. It
 1. [Project overview](#1-project-overview)
 2. [Repository layout](#2-repository-layout)
 3. [Setup](#3-setup)
-4. [Connecting to the broker (OANDA)](#4-connecting-to-the-broker-oanda)
+4. [Connecting brokers](#4-connecting-brokers)
 5. [Historical data pipeline](#5-historical-data-pipeline)
 6. [Strategies](#6-strategies)
-7. [Live trading bot](#7-live-trading-bot)
+7. [Trading bot](#7-trading-bot)
 8. [Web dashboard](#8-web-dashboard)
 9. [API reference](#9-api-reference)
 10. [Extending the project](#10-extending-the-project)
@@ -29,7 +34,7 @@ The repository has three parts. Each is a self-contained Python project with its
 | Part | Folder | What it does |
 |---|---|---|
 | **Research and backtesting** | repo root | Downloads historical candles from OANDA, backtests the moving-average crossover and inside-bar momentum strategies, exports results to Excel, and explores ideas in Jupyter notebooks |
-| **Live trading bot** | [`TradingBotStarter/`](TradingBotStarter/) | Watches 1-minute candles for a set of pairs and trades moving-average crossovers on the OANDA account |
+| **Trading bot** | [`TradingBotStarter/`](TradingBotStarter/) | Trades strategy signals on OANDA, Binance spot and Binance futures with ATR-based stop loss and take profit and risk-% sizing; runs in Docker, paper mode by default |
 | **Indicator dashboard** | [`WebDashStarter/`](WebDashStarter/) | A Flask and Vue web page showing MACD, Bollinger Band, trend and candle-pattern signals for 21 pairs, with live candlestick charts |
 
 Typical workflow: collect data → backtest in the root project → set the chosen parameters in the bot's `settings.json` → run the bot. The dashboard can run alongside to watch the market.
@@ -57,19 +62,21 @@ The commit history follows numbered lessons (`#NN - <topic>`), so the code reads
 ├── ma_test_res.pkl, all_trades.pkl, ma_results.xlsx   # ma_sim.py output
 ├── USD_JPY_H4_trades.pkl    # inside-bar signals written by the explore notebooks
 │
+├── docker-compose.yml       # services: bot (paper by default) and tests
+├── .env.example             # copy to .env: trading mode, broker environments, API keys
+│
 ├── TradingBotStarter/
 │   ├── bot.py               # TradingBot main loop (entry point)
-│   ├── settings.json        # pairs to trade and strategy parameters per pair
-│   ├── settings.py          # loads settings.json
-│   ├── timing.py            # tracks the last complete candle for each pair
-│   ├── technicals.py        # strategy: MA crossover decision on the latest candles
-│   ├── trade_manager.py     # closes and opens trades on OANDA
-│   ├── oanda_api.py         # OANDA client: candles, orders, trades
-│   ├── oanda_trade.py       # OandaTrade: parsed open-trade object
-│   ├── log_wrapper.py       # file logger writing to ./logs/<name>.log
-│   ├── runner.py            # manual console for opening and closing a test trade
-│   ├── defs.py, utils.py, requirements.txt
-│   └── logs/
+│   ├── settings.json        # instruments, strategy parameters, risk settings
+│   ├── config.py            # loads settings.json + environment variables, real-money guard
+│   ├── trade_manager.py     # one position per instrument: hold, reverse or exit on signals
+│   ├── risk.py              # ATR stop loss / take profit, risk-% sizing, order guardrails
+│   ├── indicators.py        # SMA, ATR
+│   ├── strategies/          # Strategy interface + ma_cross (add new strategies here)
+│   ├── brokers/             # Broker interface + oanda, binance_spot, binance_futures, paper, factory
+│   ├── tests/               # pytest unit tests + network integration tests
+│   ├── Dockerfile, requirements.txt, requirements-dev.txt, pytest.ini
+│   └── logs/                # trading_bot.log, paper_state.json, paper_trades.csv (git-ignored)
 │
 └── WebDashStarter/
     ├── app.py               # Flask server: static site and JSON endpoints
@@ -104,9 +111,26 @@ Start Jupyter from the repo root, because the notebooks import `utils`, `defs` a
 
 ## 3. Setup
 
-**Requirements:** Python 3.11 and an OANDA account (a free practice account works; see [section 4](#4-connecting-to-the-broker-oanda)).
+### Trading bot: Docker
 
-The `venv/` folders in the repository were created on another computer and won't work on yours. Create a fresh environment instead. One environment at the repo root can serve all three parts:
+The bot is built, tested and run **only in Docker**. You need Docker Desktop with Compose; no local Python is required.
+
+```bash
+cp .env.example .env                       # then fill in keys (optional for paper mode)
+docker compose build                       # build the image
+docker compose run --rm tests              # unit tests (offline)
+docker compose run --rm tests pytest -m integration   # network tests against broker test environments
+docker compose up bot                      # run the bot (Ctrl+C to stop); paper mode by default
+docker compose logs -f bot                 # follow the log when started with `up -d`
+```
+
+The tests service mounts `TradingBotStarter/` into the container, so code edits are picked up without rebuilding. The bot service uses the built image, so run `docker compose build` after changing the code.
+
+### Research and dashboard: local Python
+
+**Requirements:** Python 3.11 and an OANDA account (a free practice account works; see [section 4](#4-connecting-brokers)).
+
+The `venv/` folders in the repository were created on another computer and won't work on yours. Create a fresh environment instead. One environment at the repo root can serve the research scripts and the dashboard:
 
 ```bash
 python -m venv .venv
@@ -116,28 +140,65 @@ source .venv/bin/activate       # macOS / Linux
 pip install "pandas<2" "numpy<2" requests python-dateutil plotly xlsxwriter jupyter flask python-dotenv whitenoise schedule
 ```
 
-`pandas<2` is needed because `ma_excel.py` calls `ExcelWriter.save()`, which pandas 2.0 removed. If you only want one part, `TradingBotStarter/requirements.txt` and `WebDashStarter/requirements.txt` list that part's own dependencies.
+`pandas<2` is needed because `ma_excel.py` calls `ExcelWriter.save()`, which pandas 2.0 removed. If you only want the dashboard, `WebDashStarter/requirements.txt` lists its own dependencies. The trading bot doesn't need this environment; it runs in Docker.
 
 **Every script uses paths relative to the folder it runs in** (`his_data/`, `settings.json`, `logs/`, `data.json`), so always `cd` into a project's folder before running its scripts.
 
 ---
 
-## 4. Connecting to the broker (OANDA)
+## 4. Connecting brokers
 
-OANDA is the only broker the project supports. All three parts call OANDA's v20 REST API directly with `requests`; no broker SDK is used.
+| Broker | Markets | Used by | Library |
+|---|---|---|---|
+| OANDA | Forex | research, dashboard, bot | OANDA v20 REST API via `requests` |
+| Binance spot | Crypto pairs and **bStocks** (tokenized US stocks such as `TSLAB/USDT`, `NVDAB/USDT`) | bot | [ccxt](https://github.com/ccxt/ccxt) |
+| Binance USDⓈ-M futures | Crypto perpetuals (`ETH/USDT:USDT`), long and short | bot | ccxt |
 
-### 4.1 Get credentials
+### 4.1 OANDA credentials
 
 1. Open an OANDA account. Use a **practice (demo)** account while testing.
 2. In the OANDA account portal, open **Manage API Access** and generate a personal access token.
 3. Note your **account ID**. Practice account IDs look like `101-001-XXXXXXXX-001`.
 
-### 4.2 Configure `defs.py`
+**For the bot**, put them in `.env` at the repo root (copied from `.env.example`). `.env` is git-ignored.
 
-Each part has its own `defs.py`, so update every copy you plan to use:
+```bash
+OANDA_API_KEY=<your-api-token>
+OANDA_ACCOUNT_ID=<your-account-id>
+OANDA_ENV=practice        # or live (real money; also needs ALLOW_REAL_MONEY=yes)
+```
+
+In paper mode the bot still needs these keys to read OANDA prices. Without them, OANDA instruments are skipped with a warning.
+
+### 4.2 Binance credentials
+
+| `BINANCE_ENV` | Where to get keys | Notes |
+|---|---|---|
+| `testnet` (default) | Spot: [testnet.binance.vision](https://testnet.binance.vision) (log in with GitHub, "Generate HMAC_SHA256 Key"). Futures: [testnet.binancefuture.com](https://testnet.binancefuture.com) | Test funds; spot testnet also lists bStocks such as `TSLAB/USDT` |
+| `demo` | Binance Demo Trading API management (demo.binance.com) | One key set covers spot and futures |
+| `live` | Binance account API management | Real money; needs `ALLOW_REAL_MONEY=yes` |
+
+```bash
+BINANCE_API_KEY=<spot key>
+BINANCE_API_SECRET=<spot secret>
+BINANCE_ENV=testnet
+BINANCE_FUTURES_API_KEY=<futures key>        # optional; defaults to BINANCE_API_KEY
+BINANCE_FUTURES_API_SECRET=<futures secret>  # optional; defaults to BINANCE_API_SECRET
+```
+
+The spot testnet and futures testnet issue separate keys, so set both pairs when testing both markets. With `demo` or `live`, one key pair usually covers both, and the futures variables can stay empty.
+
+Paper mode needs **no Binance keys**: prices come from Binance's public data mirror `data-api.binance.vision`, and futures are simulated on the matching spot price.
+
+**Access notes:**
+- bStocks are only offered to eligible users in permitted jurisdictions and are not available to US users. Check your account's eligibility before trading them live.
+- Some networks block `binance.com`. The testnet and `binance.vision` hosts may still be reachable, and the bot defaults to those.
+
+### 4.3 Research and dashboard: `defs.py`
+
+The research scripts and dashboard still read OANDA credentials from their own `defs.py`. Update each copy you use:
 
 - [`defs.py`](defs.py) (research)
-- [`TradingBotStarter/defs.py`](TradingBotStarter/defs.py) (live bot)
 - [`WebDashStarter/defs.py`](WebDashStarter/defs.py) (dashboard)
 
 ```python
@@ -158,7 +219,7 @@ SECURE_HEADER = {
 
 A token only works with the environment it was created for. A live account also needs a live token.
 
-> **Keep credentials out of git.** The repository has no `.gitignore`, and the `defs.py` files are tracked. A safer pattern is to read the values from environment variables:
+> **Keep credentials out of git.** These two `defs.py` files are tracked by git. A safer pattern is to read the values from environment variables, as the bot does:
 >
 > ```python
 > import os
@@ -166,15 +227,15 @@ A token only works with the environment it was created for. A live account also 
 > ACCOUNT_ID = os.environ["OANDA_ACCOUNT_ID"]
 > ```
 
-### 4.3 Test the connection
-
-From the repo root:
+### 4.4 Test the connections
 
 ```bash
-python -c "from oanda_api import OandaAPI; print(OandaAPI().fetch_instruments()[0])"
+docker compose run --rm tests pytest -m integration -rs
 ```
 
-`200` means the token and account ID work. `401` means OANDA rejected the token.
+- Without keys, two tests run: live prices from the Binance data mirror, and the shape of the futures SL/TP orders against the futures testnet.
+- With keys in `.env`, the tests also open and close one minimum-size trade with SL/TP on the OANDA practice account, the Binance spot testnet and the Binance futures testnet.
+- `-rs` lists the skipped tests and the reason each was skipped.
 
 ---
 
@@ -293,9 +354,9 @@ python inside_bar_sim.py    # prints the total R per pair and a grand total for 
 
 The M5 bid/ask replay is the most realistic of these. The H4-close versions only see candle closes and let trades overlap.
 
-### 6.3 Live MA crossover (`TradingBotStarter/technicals.py`)
+### 6.3 Live MA crossover (`TradingBotStarter/strategies/ma_cross.py`)
 
-This is the same crossover idea as 6.1, run live on **M1** candles for each pair in `settings.json`. The default settings use a 2/8 crossover with 1,000 units, a combination not covered by the backtest grid. One detail differs from the backtest: the live check uses strict inequalities (`D_PREV > 0 and D_NOW < 0` → SELL, and the reverse → BUY). [Section 7](#7-live-trading-bot) describes the full loop.
+This is the same crossover idea as 6.1, run by the bot on every instrument in `settings.json`. The default is an 8/21 crossover on M5 candles. One detail differs from the backtest: the live check uses strict inequalities (`D_PREV > 0 and D_NOW < 0` → SELL, and the reverse → BUY). The bot adds the stop loss, take profit and size to each signal; [section 7](#7-trading-bot) describes how.
 
 ### 6.4 Dashboard indicators and candle patterns (`WebDashStarter/data_prep.py`)
 
@@ -321,69 +382,129 @@ These are signals to look at on the dashboard; nothing trades on them automatica
 
 ---
 
-## 7. Live trading bot
+## 7. Trading bot
 
 ### How it works
 
 ```
-bot.py  TradingBot.run()   (repeats every 10 s)
+bot.py  TradingBot.run()            every poll_seconds (10 s), for each instrument:
   │
-  ├─ update_timings()      for each pair: ask OANDA for the last complete M1 candle;
-  │                        if it is newer than Timing.last_candle, mark the pair ready
+  ├─ broker.last_complete_candle_time()   new candle since last time? if not, wait
+  ├─ broker.reconcile()                   tidy up after SL/TP exits (paper mode checks SL/TP here)
+  ├─ broker.get_candles()                 enough complete candles for the strategy and ATR
   │
-  ├─ process_pairs()       for each ready pair:
-  │     Technicals.get_trade_decision(candle_time)
-  │        ├─ fetch the last (long_ma + 2) candles; skip if the newest candle time
-  │        │  doesn't match the expected one
-  │        └─ compute MA_short, MA_long, D_PREV, D_NOW → BUY / SELL / NONE
-  │     units = decision × settings[pair].units
-  │
-  └─ TradeManager.place_trades(trades)
-        ├─ close_trades(): close every open trade on those pairs (GET openTrades → PUT close)
-        └─ create_trades(): open a market order for each (POST orders, FOK)
+  └─ TradeManager.process()
+        ├─ strategy.decide(candles, position)  →  Decision(BUY / SELL / NONE, optional SL/TP, reason)
+        ├─ same direction as the open position →  hold
+        ├─ opposite direction                  →  close the position, then:
+        │     spot SELL                        →  exit only (spot can't short)
+        ├─ risk.build_order()                  →  SL/TP, size, rounding, guardrails (may reject)
+        └─ broker.open_position(order)         →  order sent with SL and TP attached
 ```
 
-So the bot reverses its position on every crossover. A new signal closes the existing trade on that pair and opens one in the signal's direction.
+There is one position per instrument, and every position has a stop loss and a take profit from the moment it opens.
 
-### Configuration
+### Stop loss, take profit and sizing (`risk.py`)
 
-[`TradingBotStarter/settings.json`](TradingBotStarter/settings.json) has one entry per pair to trade:
+| Step | Rule (defaults) |
+|---|---|
+| Entry estimate | Ask for a buy, bid for a sell |
+| Stop loss | `sl_atr_mult × ATR(atr_period)` from entry: 1.5 × ATR(14). A strategy may set its own instead |
+| Take profit | `rr ×` the stop distance: 2 × |
+| Size | `balance × risk_pct% ÷ (stop distance × quote→account conversion)`: 1% of the balance is lost if the stop is hit |
+| Caps | Spot: free quote balance. Futures: free margin × leverage. Then rounded down to the lot step |
+
+**Rejected orders.** Any of these is logged and nothing is sent:
+- SL or TP on the wrong side of the entry;
+- the stop closer than `min_sl_spreads` (2) × the bid/ask spread;
+- size or order value below the broker minimum;
+- `max_open_positions` reached;
+- `risk_pct` above 5;
+- no way to convert the quote currency to the account currency.
+
+**How each broker attaches SL/TP:**
+
+| Broker | Entry | Stop loss / take profit |
+|---|---|---|
+| OANDA | Market order (FOK) | `stopLossOnFill` / `takeProfitOnFill` in the same order, so the trade is never unprotected |
+| Binance spot | Market buy | OCO sell (`POST /api/v3/orderList/oco`): `LIMIT_MAKER` take profit above, `STOP_LOSS` below. Levels are re-anchored to the actual fill price. If the OCO is rejected, the coins are sold back immediately |
+| Binance futures | Market buy or sell | Two reduce-only conditional orders (`STOP_MARKET`, `TAKE_PROFIT_MARKET`) via Binance's algo-order endpoint. If either fails, the position is closed |
+| Paper | Simulated fill at bid/ask | Checked on each new candle's high/low (bid/ask where available). If both levels are inside one candle, the stop counts as hit first. A gap through the stop fills at the open |
+
+**Exits and orphan orders:**
+- Binance futures, at set-up: one-way position mode, isolated margin, and the `leverage` from settings.
+- After an SL/TP exit, `reconcile()` cancels the leftover exit order.
+- Spot positions are tracked in `logs/binance_spot_state.json`, so coins you already held are never sold by the bot.
+
+### Modes and environments (`.env`)
+
+| Variable | Values | Default |
+|---|---|---|
+| `TRADING_MODE` | `paper`: simulate on live prices. `broker`: send orders | `paper` |
+| `OANDA_ENV` | `practice`, `live` | `practice` |
+| `BINANCE_ENV` | `testnet`, `demo`, `live` | `testnet` |
+| `ALLOW_REAL_MONEY` | Must be `yes` before any `live` environment is used in broker mode | `no` |
+
+**Paper mode:**
+- Starts with `paper.starting_balance` from `settings.json`.
+- Keeps its state in `logs/paper_state.json`, so a restart resumes the open positions.
+- Appends every closed trade to `logs/paper_trades.csv`.
+- Treats all brokers as one account currency (USD and USDT are treated as equal).
+
+### Configuration (`settings.json`)
 
 ```json
 {
-    "EUR_USD": { "pair": "EUR_USD", "units": 1000, "short_ma": 2, "long_ma": 8 }
+    "poll_seconds": 10,
+    "paper": { "starting_balance": 10000 },
+    "defaults": {
+        "granularity": "M5", "strategy": "ma_cross", "params": { "short_ma": 8, "long_ma": 21 },
+        "risk_pct": 1.0, "atr_period": 14, "sl_atr_mult": 1.5, "rr": 2.0,
+        "max_open_positions": 5, "min_sl_spreads": 2.0
+    },
+    "instruments": [
+        { "broker": "oanda",           "symbol": "EUR_USD" },
+        { "broker": "binance_spot",    "symbol": "BTC/USDT" },
+        { "broker": "binance_spot",    "symbol": "TSLAB/USDT" },
+        { "broker": "binance_futures", "symbol": "ETH/USDT:USDT", "leverage": 1 }
+    ]
 }
 ```
 
+Every key in `defaults` can be overridden per instrument. Set `"enabled": false` to switch an instrument off.
+
 | Field | Meaning |
 |---|---|
-| `pair` | OANDA instrument name |
-| `units` | Order size in base-currency units (1,000 = one micro lot). Always positive; the signal sets the direction |
-| `short_ma`, `long_ma` | Moving-average periods in candles. Currently capped at `long_ma = 8`; see [known issues](#11-known-issues-and-limitations) |
+| `broker` | `oanda`, `binance_spot` or `binance_futures` |
+| `symbol` | OANDA: `EUR_USD`. Binance spot: `BTC/USDT`, bStocks `TSLAB/USDT`. Futures: `ETH/USDT:USDT` |
+| `granularity` | `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D` |
+| `strategy`, `params` | Strategy name from `strategies/__init__.py` and its parameters |
+| `leverage` | Futures only, default 1 |
 
-The timeframe and polling interval are constants at the top of `bot.py`: `GRANULARITY = "M1"` and `SLEEP = 10.0`.
+Start with `M5` or slower. On `M1`, quiet markets (bStocks outside US hours, for example) give ATR stops of a few cents, which the spread guard rejects.
 
 ### Running
 
 ```bash
-cd TradingBotStarter
-python bot.py           # start the bot (Ctrl+C to stop)
-python settings.py      # print the loaded settings
-python oanda_api.py     # print the account's open trades
-python runner.py        # manual console: T = buy 1000 EUR_USD, C = close it, Q = quit
+docker compose up bot            # foreground; Ctrl+C to stop
+docker compose up -d bot         # background
+docker compose logs -f bot       # follow the log
+docker compose down              # stop and remove
 ```
 
-### Logs
+At start-up the bot logs the mode and environments, then a `watching` line per instrument. It trades from the next completed candle onward. Each decision is logged with its reason, and each order with entry, SL, TP, size and the amount at risk.
 
-The bot writes to `TradingBotStarter/logs/`. Each run overwrites the files.
+### Logs and state
+
+The bot writes these files to `TradingBotStarter/logs/` (git-ignored):
 
 | File | Contents |
 |---|---|
-| `Bot.log` | Startup settings, new-candle detection, which pairs are ready |
-| `Technicals.log` | The last two rows of the computed MA table for each decision, and the decision |
-| `Trade.log` | Each close and open request and its result |
+| `trading_bot.log` | Everything also printed to the console (rotated at 5 MB) |
+| `paper_state.json`, `paper_trades.csv` | Paper balance, open positions and closed-trade history |
+| `binance_spot_state.json` | Spot positions opened by the bot, with their OCO order-list IDs |
 
-`TradingBot.log`, `TechnicalsBot.log` and `Test.log` in that folder are left over from earlier versions.
+`Bot.log`, `Technicals.log`, `Trade.log`, `TradingBot.log`, `TechnicalsBot.log` and `Test.log` are left over from the earlier OANDA-only version.
 
 ---
 
@@ -424,24 +545,45 @@ All paths are relative to `OANDA_URL`, and every request sends `Authorization: B
 |---|---|---|---|
 | GET | `/accounts/{ACCOUNT_ID}/instruments` | all | List tradeable instruments (name, pipLocation, marginRate…) |
 | GET | `/instruments/{pair}/candles` | all | Candles. Params: `granularity` (`M1`, `M5`, `H1`, `H4`…), `price` (`M`, `B`, `A` or a combination such as `MBA`), and either `count` or `from`/`to` (Unix seconds) |
-| POST | `/accounts/{ACCOUNT_ID}/orders` | bot | Market order, plus optional `TAKE_PROFIT` / `STOP_LOSS` orders linked by `tradeID` |
+| GET | `/accounts/{ACCOUNT_ID}/summary` | bot | Account NAV (risk sizing) and home currency |
+| GET | `/accounts/{ACCOUNT_ID}/pricing?instruments=X&includeHomeConversions=true` | bot | Bid/ask and the quote→account currency factor (`homeConversions[].accountLoss`) |
+| POST | `/accounts/{ACCOUNT_ID}/orders` | bot | Market order with the stop loss and take profit attached |
 | PUT | `/accounts/{ACCOUNT_ID}/trades/{tradeID}/close` | bot | Close a trade |
-| GET | `/accounts/{ACCOUNT_ID}/openTrades` | bot | List open trades |
+| GET | `/accounts/{ACCOUNT_ID}/openTrades` | bot | Open trades, with their SL/TP orders |
 
-Market order body sent by `place_trade()` (negative `units` sell):
-
-```json
-{ "order": { "units": 1000, "instrument": "EUR_USD", "timeInForce": "FOK",
-             "type": "MARKET", "positionFill": "DEFAULT" } }
-```
-
-Take-profit / stop-loss body sent by `set_sl_tp()`:
+Market order body sent by `OandaBroker.open_position()`. Negative `units` sell, and prices use the instrument's `displayPrecision`:
 
 ```json
-{ "order": { "timeInForce": "GTC", "price": "1.10500", "type": "TAKE_PROFIT", "tradeID": "261" } }
+{ "order": { "type": "MARKET", "instrument": "EUR_USD", "units": "-1000",
+             "timeInForce": "FOK", "positionFill": "DEFAULT",
+             "stopLossOnFill":   { "price": "1.10150", "timeInForce": "GTC" },
+             "takeProfitOnFill": { "price": "1.09700", "timeInForce": "GTC" } } }
 ```
 
-### 9.2 Python client classes
+### 9.2 Binance endpoints used (through ccxt 4.5.85)
+
+| Environment | Spot | USDⓈ-M futures |
+|---|---|---|
+| `testnet` | `testnet.binance.vision` | `testnet.binancefuture.com` |
+| `demo` | `demo-api.binance.com` | `demo-fapi.binance.com` |
+| `live` | `api.binance.com` | `fapi.binance.com` |
+| paper prices | `data-api.binance.vision` (public, read-only) | spot price of the same pair |
+
+| Call | ccxt method | Used for |
+|---|---|---|
+| `GET /api/v3/klines`, `/fapi/v1/klines` | `fetch_ohlcv` | Candles (the one still forming is dropped) |
+| `GET /api/v3/depth`, `/fapi/v1/depth` | `fetch_order_book` | Best bid/ask |
+| `GET /api/v3/account`, `/fapi/v2/balance` | `fetch_balance` | Free/total USDT for sizing |
+| `POST /api/v3/order` | `create_order` | Spot market buy and sell |
+| `POST /api/v3/orderList/oco` | `private_post_orderlist_oco` | Spot SL/TP: `aboveType=LIMIT_MAKER`, `belowType=STOP_LOSS` (or `STOP_LOSS_LIMIT` with a 0.2% limit offset when a symbol doesn't allow `STOP_LOSS`) |
+| `DELETE /api/v3/orderList` | `private_delete_orderlist` | Cancel the OCO before an exit on signal |
+| `POST /fapi/v1/order` | `create_order` | Futures market entry and exit |
+| `POST /fapi/v1/algoOrder` | `create_order` with `stopLossPrice` / `takeProfitPrice` + `reduceOnly` | Futures SL/TP (`STOP_MARKET` / `TAKE_PROFIT_MARKET`) |
+| `GET /fapi/v1/openAlgoOrders`, `DELETE /fapi/v1/algoOpenOrders` | `fetch_open_orders` / `cancel_all_orders` with `{"trigger": True}` | Find and cancel leftover SL/TP orders |
+| `GET /fapi/v2/positionRisk` | `fetch_positions` | Open futures position |
+| position mode, margin type, leverage | `set_position_mode`, `set_margin_mode`, `set_leverage` | One-way, isolated, leverage from settings |
+
+### 9.3 Python client classes
 
 **Research: [`oanda_api.py`](oanda_api.py)**
 
@@ -463,17 +605,31 @@ Take-profit / stop-loss body sent by `set_sl_tp()`:
 | `utils.get_his_data_filename(pair, granularity)` | `his_data/{pair}_{granularity}.pkl` |
 | `utils.get_utc_dt_from_string(s)` / `utils.time_utc()` | UTC datetimes |
 
-**Live bot: [`TradingBotStarter/oanda_api.py`](TradingBotStarter/oanda_api.py)**
+**Bot brokers: [`TradingBotStarter/brokers/base.py`](TradingBotStarter/brokers/base.py)**
+
+Every broker (`OandaBroker`, `BinanceSpotBroker`, `BinanceFuturesBroker`, `PaperBroker`) implements the same `Broker` interface:
 
 | Method | Returns |
 |---|---|
-| `make_request(url, params, added_headers, verb, data, code_ok)` | `(status_code, json or None)`; `(400, None)` on a connection error |
-| `fetch_candles(pair, count=10, granularity="H1")` | `(status_code, DataFrame or None)` |
-| `last_complete_candle(pair, granularity="H1")` | Time of the newest complete candle, or `None` |
-| `place_trade(pair, units, take_profit=None, stop_loss=None)` | `(trade_id, ok)` on success, `None` on failure |
-| `set_sl_tp(price, order_type, trade_id)` | `True` / `False` |
-| `close_trade(trade_id)` | `True` / `False` |
-| `open_trades()` | `([OandaTrade], ok)`. `OandaTrade` has `trade_id`, `instrument`, `currentUnits`, `unrealizedPL`, `openTime` |
+| `get_candles(symbol, granularity, count)` | DataFrame of complete candles: `time`, `volume`, `mid_o/h/l/c`, plus `bid_*`/`ask_*` where available |
+| `last_complete_candle_time(symbol, granularity)` | Time of the newest complete candle, or `None` |
+| `get_quote(symbol)` | `Quote(bid, ask, quote_to_account)` |
+| `get_instrument(symbol)` | `InstrumentInfo(tick_size, step_size, min_size, min_notional, quote_currency)` |
+| `get_balance()` | Balance used for sizing |
+| `get_position(symbol)` | The bot's `Position(side, size, entry_price, stop_loss, take_profit, id)` or `None`; raises `BrokerError` if it can't tell |
+| `open_position(order)` | `OrderResult(ok, position, error)`. The order always includes `stop_loss` and `take_profit` |
+| `close_position(symbol)` | `True` / `False` |
+| `max_size(symbol, side, entry)` | Largest size the account can fund, or `None` |
+| `reconcile(symbol, granularity)` | Cleans up after SL/TP exits |
+| `can_short` (attribute) | `False` for Binance spot |
+
+**Bot strategies: [`TradingBotStarter/strategies/base.py`](TradingBotStarter/strategies/base.py)**
+
+| Member | Purpose |
+|---|---|
+| `Strategy.required_candles()` | How many complete candles `decide()` needs |
+| `Strategy.decide(candles, position)` | Returns `Decision(signal, stop_loss=None, take_profit=None, reason="")` |
+| `risk.build_order(decision, ...)` | Turns a decision into an `Order` or raises `RiskError` |
 
 **Dashboard: [`WebDashStarter/oanda_api.py`](WebDashStarter/oanda_api.py)**
 
@@ -483,7 +639,7 @@ Take-profit / stop-loss body sent by `set_sl_tp()`:
 | `OandaAPI.pricing_api(pair, count=50, granularity="M5")` | `{time: [...], volume: [...], mid_o: [...], ...}` lists ready for Plotly, or `[]` |
 | `get_pairs_list()` | Raw instrument list or `None` |
 
-### 9.3 Dashboard HTTP API
+### 9.4 Dashboard HTTP API
 
 | Endpoint | Response |
 |---|---|
@@ -548,98 +704,113 @@ Tips:
 - To include spread, compute gains from `ask_c` when buying and `bid_c` when selling, as `inside_bar_sim.py` does.
 - To test a parameter grid, loop over the parameters and collect results into a DataFrame, as `ma_sim.run()` does. You can reuse `ma_excel.create_excel()` if your result columns match.
 
-### 10.2 Add a strategy to the live bot
+### 10.2 Add a strategy to the trading bot
 
-The bot only needs a class with `get_trade_decision(candle_time)` that returns `BUY`, `SELL` or `NONE`. The easiest route is to subclass `Technicals`, which already fetches candles and checks that the newest candle matches.
+A strategy only decides. It never places orders: every `Decision` goes through `risk.build_order()`, which adds or checks the stop loss and take profit and sizes the trade.
 
-**Step 1: lift the 10-candle limit.** In `TradingBotStarter/oanda_api.py`, `fetch_candles()` ignores its `count` argument. Fix it:
-
-```python
-params['count'] = count        # was: params['count'] = 10
-```
-
-**Step 2: add the strategy class**, for example `TradingBotStarter/rsi_technicals.py`:
+**Step 1: write the class**, for example `TradingBotStarter/strategies/rsi.py`:
 
 ```python
-from technicals import Technicals
-from defs import BUY, SELL, NONE
+from defs import BUY, SELL
+from strategies.base import Decision, Strategy
 
-class RsiTechnicals(Technicals):
 
-    def get_trade_decision(self, candle_time):
-        # +3: RSI needs period+1 rows for its first value, one more for the previous
-        # value, and OANDA's still-forming candle is dropped from the response
-        df = self.fetch_candles(self.settings.rsi_period + 3, candle_time)
-        if df is None:
-            return NONE
-        return self.process_candles(df)
+class RsiStrategy(Strategy):
+    """BUY when RSI crosses up through `low`, SELL when it crosses down through `high`."""
+    name = "rsi"
 
-    def process_candles(self, df):
-        period = self.settings.rsi_period
-        delta = df.mid_c.diff()
-        avg_gain = delta.clip(lower=0).rolling(period).mean()
-        avg_loss = (-delta.clip(upper=0)).rolling(period).mean()
-        df['RSI'] = 100 - 100 / (1 + avg_gain / avg_loss)
+    def __init__(self, params=None):
+        super().__init__(params)
+        self.period = int(self.params.get("period", 14))
+        self.low = float(self.params.get("low", 30))
+        self.high = float(self.params.get("high", 70))
 
-        prev, now = df.RSI.iloc[-2], df.RSI.iloc[-1]
-        decision = NONE
-        if prev < 30 <= now:
-            decision = BUY
-        elif prev > 70 >= now:
-            decision = SELL
+    def required_candles(self):
+        return self.period + 2
 
-        self.log_message(f"{self.pair} RSI prev:{prev:.1f} now:{now:.1f} decision:{decision}")
-        return decision
+    def decide(self, candles, position=None):
+        delta = candles.mid_c.diff()
+        avg_gain = delta.clip(lower=0).rolling(self.period).mean()
+        avg_loss = (-delta.clip(upper=0)).rolling(self.period).mean()
+        rsi = 100 - 100 / (1 + avg_gain / avg_loss)
+        prev, now = rsi.iloc[-2], rsi.iloc[-1]
+        if prev < self.low <= now:
+            return Decision(BUY, reason=f"RSI crossed up through {self.low} ({now:.1f})")
+        if prev > self.high >= now:
+            return Decision(SELL, reason=f"RSI crossed down through {self.high} ({now:.1f})")
+        return Decision(reason=f"RSI {now:.1f}")
 ```
 
-**Step 3: add the new parameter to the settings.** In `settings.py`:
+**Step 2: register it** in `strategies/__init__.py`:
 
 ```python
-class Settings():
-    def __init__(self, pair, units, short_ma, long_ma, rsi_period=14):
-        self.pair = pair
-        self.units = units
-        self.short_ma = short_ma
-        self.long_ma = long_ma
-        self.rsi_period = rsi_period
+from strategies.rsi import RsiStrategy
 
-    @classmethod
-    def from_file_ob(cls, ob):
-        return Settings(ob['pair'], ob['units'], ob['short_ma'], ob['long_ma'],
-                        ob.get('rsi_period', 14))
+STRATEGIES = {
+    MACrossStrategy.name: MACrossStrategy,
+    RsiStrategy.name: RsiStrategy,
+}
 ```
 
-and in `settings.json`:
+**Step 3: use it** in `settings.json`, per instrument or in `defaults`:
 
 ```json
-"EUR_USD": { "pair": "EUR_USD", "units": 1000, "short_ma": 2, "long_ma": 8, "rsi_period": 14 }
+{ "broker": "binance_spot", "symbol": "BTC/USDT", "strategy": "rsi", "params": { "period": 14, "low": 30, "high": 70 } }
 ```
 
-**Step 4: switch the bot to the new class.** In `bot.py`:
+**Step 4: test it.** Add a unit test next to `tests/test_strategy_and_indicators.py`; `tests/helpers.py` has candle builders. Then run `docker compose run --rm tests`, and run the bot in paper mode before broker mode.
 
-```python
-from rsi_technicals import RsiTechnicals
-...
-techs = RsiTechnicals(self.settings[pair], self.api, pair, GRANULARITY, log=self.tech_log)
+What `decide()` receives:
+- `candles`: complete candles only, oldest first, with at least `required_candles()` rows (the bot also fetches enough for ATR).
+- `position`: the open `Position` or `None`.
+
+Return `Decision(BUY | SELL | NONE, stop_loss=None, take_profit=None, reason="...")`:
+- leave `stop_loss` and `take_profit` as `None` to use the ATR rule;
+- or set your own prices, for example below the last swing low. `risk.py` still checks they're on the right side and far enough away, and sizes the trade from your stop.
+
+### 10.3 AI strategies (planned: Amazon Bedrock)
+
+An AI-driven strategy is just another `Strategy`. `decide()` would:
+1. build a prompt from the recent candles and the open position;
+2. call the model with keys from `.env`;
+3. parse a structured answer into `Decision(signal, stop_loss, take_profit, reason)`.
+
+Because the decision still passes through `risk.build_order()`, the model can't:
+- skip the stop loss or take profit;
+- exceed `risk_pct` or `max_open_positions`;
+- send orders directly.
+
+Treat any answer that doesn't parse cleanly as `NONE`, and log the model's `reason` with each trade. This is not built yet.
+
+### 10.4 Tune stop loss, take profit and risk
+
+All of these work in `defaults` or per instrument in `settings.json`:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `risk_pct` | 1.0 | % of balance lost if the stop is hit (max 5) |
+| `atr_period` | 14 | ATR look-back in candles |
+| `sl_atr_mult` | 1.5 | Stop distance in ATRs |
+| `rr` | 2.0 | Take-profit distance as a multiple of the stop distance |
+| `max_open_positions` | 5 | No new orders beyond this many open positions across all instruments |
+| `min_sl_spreads` | 2.0 | Reject trades whose stop is closer than this many bid/ask spreads |
+| `leverage` | 1 | Futures only |
+
+For example, a wider stop with a 3:1 target on one instrument:
+
+```json
+{ "broker": "oanda", "symbol": "GBP_JPY", "sl_atr_mult": 2.0, "rr": 3.0, "risk_pct": 0.5 }
 ```
 
-To trade a different timeframe, change `GRANULARITY` in `bot.py` (for example `"M5"` or `"H1"`).
+### 10.5 Add or remove traded instruments
 
-### 10.3 Add stop loss and take profit to live trades
-
-`OandaAPI.place_trade()` already accepts `take_profit` and `stop_loss` prices, but `TradeManager` never passes them. To use them:
-
-1. Have your strategy return the prices along with the signal, and add them to each trade dict in `bot.process_pairs()`, for example `{'pair': pair, 'units': units, 'take_profit': tp, 'stop_loss': sl}`.
-2. In `TradeManager.create_trades()`, call `self.api.place_trade(t['pair'], t['units'], t.get('take_profit'), t.get('stop_loss'))`.
-3. Round prices to the instrument's `displayPrecision` from the instruments endpoint. OANDA rejects prices with too many decimals.
-
-### 10.4 Add or remove traded pairs
-
-- **Live bot:** add or remove entries in `TradingBotStarter/settings.json`. The bot trades every key in that file.
+- **Trading bot:** add or remove entries in `instruments` in `TradingBotStarter/settings.json`, or set `"enabled": false`.
+  - Binance symbols use ccxt format: `BTC/USDT` for spot, `ETH/USDT:USDT` for USDⓈ-M perpetuals.
+  - bStocks are spot pairs ending in `B/USDT`, for example `TSLAB/USDT` or `NVDAB/USDT`.
 - **Dashboard:** edit the `PAIRS` list in `WebDashStarter/data_prep.py`.
 - **Backtests:** change the currency string (`"GBP,EUR,USD,CAD,JPY,NZD,CHF"`) in `collect_his_data.py`, `ma_sim.py` and `inside_bar_sim.py`, then collect data for the new pairs.
 
-### 10.5 Add an indicator to the dashboard
+### 10.6 Add an indicator to the dashboard
 
 1. In `data_prep.py`, write a function that adds a column to the DataFrame, and call it in `get_pair_data()`.
 2. Add the column name to `DF_COLS`.
@@ -647,34 +818,17 @@ To trade a different timeframe, change `GRANULARITY` in `bot.py` (for example `"
 
 The indicator only sees the last 100 M1 candles, and rows with missing values are dropped. Long look-back periods therefore leave few rows; the 50-period EMA already uses half the window.
 
-### 10.6 Connect a different broker
+### 10.7 Add another broker or exchange
 
-No other broker is implemented, but the live bot only depends on a small set of methods on `self.api`. Write an adapter class with the same interface and swap it in at `bot.py` (`self.api = OandaAPI()`):
-
-```python
-class MyBrokerAPI():
-
-    def fetch_candles(self, pair_name, count=10, granularity="H1"):
-        """Return (status_code, DataFrame). The DataFrame has complete candles only,
-        with columns time (tz-aware UTC), volume, mid_o..mid_c, bid_o..bid_c, ask_o..ask_c."""
-
-    def last_complete_candle(self, pair_name, granularity="H1"):
-        """Return the time of the newest complete candle, or None."""
-
-    def place_trade(self, pair, units, take_profit=None, stop_loss=None):
-        """units > 0 buys, units < 0 sells. Return (trade_id, ok)."""
-
-    def close_trade(self, trade_id):
-        """Return True if the trade was closed."""
-
-    def open_trades(self):
-        """Return (list of objects with .trade_id and .instrument, ok)."""
-```
-
-Inside the adapter, translate:
-- **pair names** from OANDA style (`EUR_USD`) to the broker's symbols (for example `EURUSD`)
-- **granularity codes** (`M1`, `M5`, `H1`, `H4`)
-- **order size**: OANDA uses units of base currency, many brokers use lots
+1. **Implement `Broker`** (methods in [9.3](#93-python-client-classes)) in `TradingBotStarter/brokers/<name>.py`. For another exchange that ccxt supports, subclass `CcxtBroker` from `brokers/ccxt_common.py`. It already provides candles, quotes and instrument limits, so you only add balance, positions, open/close, and that exchange's way of attaching SL/TP.
+2. **Follow the safety rules:**
+   - `open_position()` must attach the stop loss and take profit, or undo the entry if it can't;
+   - `get_position()` reports only positions the bot opened;
+   - raise `BrokerError` when the position state is unknown, so the bot skips that cycle instead of guessing.
+3. **Wire it up:**
+   - add the name to `BROKERS` in `config.py`, and any credentials to `AppConfig` and `.env.example`;
+   - build it in `brokers/factory.py`, for broker mode and as a paper-mode price source.
+4. **Test it** with a fake client like `FakeExchange` or `FakeSession` in `tests/helpers.py`, plus an integration test against the exchange's testnet in `tests/test_integration.py`.
 
 For the research scripts, only the data source needs replacing. Anything that writes pickles in the [candle data format](#candle-data-format) to `his_data/{PAIR}_{GRANULARITY}.pkl` works with `ma_sim.py`, `inside_bar_sim.py` and the notebooks.
 
@@ -682,14 +836,18 @@ For the research scripts, only the data source needs replacing. Anything that wr
 
 ## 11. Known issues and limitations
 
-**Live bot (`TradingBotStarter/`)**
-- `fetch_candles()` always requests 10 candles, so `long_ma` can be at most 8. With a larger value the long MA is never complete and the bot never trades. See the fix in [10.2](#102-add-a-strategy-to-the-live-bot).
-- `place_trade()` returns `(trade_id, ok)` on success but `None` on failure:
-  - `TradeManager.create_trades()` treats the result as a plain ID, which is why the logs show `Opened (261, True)`.
-  - `runner.py` crashes when an order fails, because it unpacks the `None`.
-- If a candle request fails during the loop, `last_complete_candle()` returns `None` and the comparison in `update_timings()` raises an exception, which stops the bot.
-- `make_request()` writes any `added_headers` into the shared `defs.SECURE_HEADER` dict, which changes them for every later request.
-- No risk management: no stop loss, take profit, position sizing or daily loss limit. A new signal on a pair closes any open trade on that pair, even one in the same direction.
+**Trading bot (`TradingBotStarter/`)**
+- Paper mode:
+  - checks the stop loss and take profit once per candle, on that candle's high and low;
+  - ignores fees and funding;
+  - simulates futures on the spot price of the same pair;
+  - treats USD and USDT as one account currency.
+- Binance sizing needs the pair's quote asset to be the account asset (USDT). Pairs quoted in other assets (for example `ETH/BTC`) are rejected by the risk check.
+- Spot positions opened by the bot are remembered in `logs/binance_spot_state.json`. If that file is deleted while a position is open, the bot loses track of it; the OCO exit order on Binance still protects it.
+- Futures set-up switches the account to one-way position mode. Binance refuses this while positions or orders are open, and the bot then logs the error and skips that instrument.
+- There is no daily loss limit or portfolio-level exposure check beyond `max_open_positions`.
+- The round-trip integration tests need practice or testnet keys and are skipped without them. The order flow is otherwise covered by unit tests with fake brokers, and by paper mode on live prices.
+- The old OANDA-only modules (`oanda_api.py`, `oanda_trade.py`, `technicals.py`, `settings.py`, `timing.py`, `utils.py`, `runner.py`) are still in the folder but no longer used.
 
 **Research scripts**
 - `ma_sim.py`, `candle_plot.ipynb` and `inside_bar_timings*.ipynb` were written when `his_data/` stored `time` as text, and they call `dateutil.parse()` on it. The current files (collected after lesson #45) store real datetimes, so these steps fail. Replace `[parse(x) for x in df.time]` with `pd.to_datetime(df.time, utc=True)`, which handles both formats.
@@ -704,6 +862,7 @@ For the research scripts, only the data source needs replacing. Anything that wr
 - If the candle request for any pair fails, `get_pair_data()` raises an exception and the refresh stops.
 
 **Repository**
-- There is no `.gitignore`, so `venv/`, `__pycache__/`, logs, data pickles and `defs.py` credentials are all committed.
+- `.gitignore` now excludes `.env`, `__pycache__/` and the bot's `logs/`. Files committed before it existed (`venv/`, `__pycache__/`, old logs, data pickles) are still tracked until they are removed from the index.
+- The research and dashboard `defs.py` files still hold an OANDA key in git; move those to environment variables too.
 - The committed `venv/` folders were built on another machine and must be recreated ([section 3](#3-setup)).
-- There are no automated tests.
+- Automated tests exist only for the trading bot (`docker compose run --rm tests`). The research scripts and dashboard have none.

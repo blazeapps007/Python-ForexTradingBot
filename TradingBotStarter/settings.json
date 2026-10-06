@@ -1,8 +1,21 @@
 {
-    "EUR_USD" :  { "pair" :  "EUR_USD", "units": 1000, "short_ma": 2, "long_ma": 8 },
-    "GBP_JPY" :  { "pair" :  "GBP_JPY", "units": 1000, "short_ma": 2, "long_ma": 8 },
-    "AUD_USD" :  { "pair" :  "AUD_USD", "units": 1000, "short_ma": 2, "long_ma": 8 },
-    "GBP_USD" :  { "pair" :  "GBP_USD", "units": 1000, "short_ma": 2, "long_ma": 8 },
-    "EUR_CHF" :  { "pair" :  "EUR_CHF", "units": 1000, "short_ma": 2, "long_ma": 8 },
-    "EUR_GBP" :  { "pair" :  "EUR_GBP", "units": 1000, "short_ma": 2, "long_ma": 8 }
+    "poll_seconds": 10,
+    "paper": { "starting_balance": 10000 },
+    "defaults": {
+        "granularity": "M5",
+        "strategy": "ma_cross",
+        "params": { "short_ma": 8, "long_ma": 21 },
+        "risk_pct": 1.0,
+        "atr_period": 14,
+        "sl_atr_mult": 1.5,
+        "rr": 2.0,
+        "max_open_positions": 5
+    },
+    "instruments": [
+        { "broker": "oanda",           "symbol": "EUR_USD" },
+        { "broker": "oanda",           "symbol": "GBP_JPY" },
+        { "broker": "binance_spot",    "symbol": "BTC/USDT" },
+        { "broker": "binance_spot",    "symbol": "TSLAB/USDT" },
+        { "broker": "binance_futures", "symbol": "ETH/USDT:USDT", "leverage": 1 }
+    ]
 }

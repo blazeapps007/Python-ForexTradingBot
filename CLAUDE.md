@@ -4,76 +4,86 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A Forex trading project built against the OANDA v20 REST API (practice endpoint `api-fxpractice.oanda.com`). Commits follow a course-style `#NN - <topic>` numbering. The repo holds three **independent** Python sub-projects. Each one has its own copies of `defs.py`, `oanda_api.py` and `utils.py`, and those copies have diverged. Nothing is shared between them, so a change to one project's `oanda_api.py` does not affect the others.
+A trading project with three **independent** Python sub-projects. Commits follow a course-style `#NN - <topic>` numbering. Each sub-project has its own `defs.py` and broker code, and nothing is shared between them.
 
 | Directory | Purpose |
 |---|---|
-| repo root | Research and backtesting: historical data collection, strategy simulations, Jupyter notebooks |
-| `TradingBotStarter/` | Live trading bot: moving-average crossover on M1 candles, places real orders on the practice account |
-| `WebDashStarter/` | Flask and Vue 2 dashboard showing indicator and candle-pattern KPIs for 21 pairs |
+| repo root | Research and backtesting on OANDA Forex data: historical data collection, strategy simulations, Jupyter notebooks |
+| `TradingBotStarter/` | Multi-broker trading bot (OANDA, Binance spot including bStocks, Binance USDⓈ-M futures) with ATR SL/TP and risk-% sizing. Runs in Docker, paper mode by default |
+| `WebDashStarter/` | Flask and Vue 2 dashboard showing indicator and candle-pattern KPIs for 21 Forex pairs |
 
-There are no tests, linters or build steps. `README.md` covers the strategy rules, recorded backtest results, the OANDA endpoints and step-by-step extension guides in detail. Keep it in sync when behaviour changes.
+`README.md` documents the strategy rules, recorded backtest results, broker endpoints, configuration and step-by-step extension guides. Keep it in sync when behaviour changes.
 
-## Environment
+## Testing and running: Docker only
 
-- The code targets Python 3.11 and pandas 1.5.x. `ma_excel.py` calls `ExcelWriter.save()`, which was removed in pandas 2.0.
-- The `venv/` directories committed at the root and in each sub-project were created on another machine (`pyvenv.cfg` points to `C:\Users\Mathew\...`). They won't work as-is, so recreate them locally:
-  - `python -m venv venv; venv\Scripts\activate; pip install -r requirements.txt` (in `TradingBotStarter/` or `WebDashStarter/`)
-  - The root has no `requirements.txt`. Its venv holds pandas, requests, python-dateutil, plotly, xlsxwriter and jupyter.
-- There is no `.gitignore`. `venv/`, `__pycache__/`, `logs/`, `.pkl` data and generated outputs are all tracked, so avoid `git add -A` and stage files explicitly.
-- OANDA credentials are hardcoded in each sub-project's `defs.py`. `WebDashStarter/.env` only sets Flask variables.
+The user tests **only in Docker** on their local PC. Never run python, pip or pytest on the Windows host; it has no real Python install anyway, only the Microsoft Store alias. All commands run from the repo root:
 
-## Running
+```bash
+docker compose build                                   # rebuild the bot image after code changes
+docker compose run --rm tests                          # unit tests (offline, ~2 s)
+docker compose run --rm tests pytest tests/test_risk.py::test_buy_sl_tp_from_atr_and_risk_sized   # one test
+docker compose run --rm tests pytest -m integration -rs   # network tests against broker test environments
+docker compose up bot                                  # run the bot (TRADING_MODE from .env, default paper)
+```
 
-Every script uses paths relative to the current directory (`his_data/`, `instruments.pkl`, `settings.json`, `./logs`, `data.json`). Run each one from inside its own directory.
+- The `tests` service bind-mounts `TradingBotStarter/` at `/app`, so it sees edits without a rebuild. The `bot` service uses the built image.
+- In Git Bash, prefix commands that pass container paths (e.g. `-e SETTINGS_FILE=/app/...`) with `MSYS_NO_PATHCONV=1`, or Git Bash rewrites them into Windows paths.
+- `pytest.ini` deselects `integration` tests by default. Integration tests that place orders skip unless practice/testnet keys are in `.env`, and they never run against live environments.
+- Some networks DNS-block `*.binance.com`. `testnet.binance.vision`, `testnet.binancefuture.com` and `data-api.binance.vision` usually stay reachable; that is why `BINANCE_ENV` defaults to `testnet` and paper mode reads prices from the data mirror.
 
-**Root (research):**
-- `python collect_his_data.py` downloads M5, H1 and H4 candles for 2020-01-01 to 2022-12-31 into `his_data/{PAIR}_{GRAN}.pkl`, in 2000-candle chunks. It requires `instruments.pkl`, which you can create with `OandaAPI().save_instruments()` or `instrument.ipynb`.
-- `python ma_sim.py` runs the MA-crossover grid search on H1 data and writes `ma_test_res.pkl`, `all_trades.pkl` and `ma_results.xlsx`.
-- `python ma_excel.py` rebuilds `ma_results.xlsx` from the two existing pickles.
-- `python inside_bar_sim.py` runs the inside-bar momentum backtest. H4 signals are replayed against M5 bid/ask prices.
-- Start Jupyter from the repo root, because the notebooks `import utils`, `instrument` and `defs` from there.
+## Trading bot architecture (TradingBotStarter)
 
-**TradingBotStarter:**
-- `python bot.py` runs the live bot loop.
-- `python runner.py` opens an interactive manual-trade REPL: `T` opens a 1000-unit EUR_USD trade, `C` closes it, `Q` quits.
-- `python oanda_api.py` prints open trades. `python settings.py` prints the loaded settings.
+Pipeline per instrument, on each new complete candle (`bot.py` → `trade_manager.py`):
+1. `broker.reconcile()`
+2. `strategy.decide(candles, position)`, which returns a `Decision`
+3. `TradeManager` applies the position rules: same-direction signal = hold; opposite signal = close, then open (on spot, SELL only exits)
+4. `risk.build_order()`
+5. `broker.open_position()`
 
-**WebDashStarter:** the dashboard needs two processes.
-- `python run_tasks.py` regenerates `data.json` every minute using `schedule`.
-- `flask run` or `python app.py` serves the API and the `static/` frontend.
+**Invariant: strategies never place orders.** Every `Decision`, including a future Amazon Bedrock AI strategy, must go through `risk.build_order()`, which:
+- fills in SL/TP from ATR (`sl_atr_mult × ATR`, TP = `rr ×` the stop distance);
+- sizes by `risk_pct` of the balance, using the `Quote.quote_to_account` conversion;
+- rounds to tick and step size;
+- raises `RiskError` on unsafe orders: wrong-side SL/TP, a stop closer than `min_sl_spreads × spread`, below the minimum size or notional, `max_open_positions` reached, `risk_pct > 5`.
 
-## Shared conventions
+- `brokers/base.py` defines the `Broker` interface and the `Order` / `Position` / `Quote` / `InstrumentInfo` dataclasses. `brokers/factory.py` builds one broker per broker name used in `settings.json`. In paper mode each is wrapped in a `PaperBroker` that reads real prices and simulates fills.
+- `get_position()` must raise `BrokerError` when the state is unknown, rather than return `None`, so the bot never opens a duplicate.
+- `open_position()` must attach the SL and TP, or undo the entry:
+  - **OANDA:** `stopLossOnFill` / `takeProfitOnFill` in the market order.
+  - **Binance spot:** market buy, then an OCO via `private_post_orderlist_oco`; if the OCO fails, it sells back.
+  - **Binance futures:** market entry, then reduce-only `stopLossPrice` / `takeProfitPrice` orders, which ccxt routes to the algo-order endpoint; if they fail, it closes the position.
+- Binance spot tracks only bot-opened positions in `logs/binance_spot_state.json`, so pre-existing coins are never sold.
+- Config:
+  - `settings.json` holds instruments, strategy params and risk settings: a `defaults` block merged into each instrument, with `"enabled": false` to switch one off.
+  - Environment variables hold the mode and secrets: `TRADING_MODE`, `OANDA_*`, `BINANCE_*`, optional `BINANCE_FUTURES_*`, `ALLOW_REAL_MONEY`. `.env.example` lists them.
+  - `config.py` validates everything and refuses any `live` environment in broker mode unless `ALLOW_REAL_MONEY=yes`.
+- New strategy: subclass `strategies.base.Strategy` and register it in `strategies/__init__.py` `STRATEGIES`. New broker: implement `Broker` (subclass `brokers.ccxt_common.CcxtBroker` for ccxt exchanges), add it to `BROKERS` in `config.py`, and build it in `brokers/factory.py`.
+- Tests use fakes in `tests/helpers.py`: `FakeBroker`, `FakeExchange` (ccxt), `FakeSession` (requests), and candle builders.
+- Pinned versions: `ccxt==4.5.85` and `pandas==3.0.6` on Python 3.12. The Binance broker code depends on that ccxt version's implicit endpoint names, for example `private_post_orderlist_oco`.
+- These old OANDA-only modules are unused leftovers: `oanda_api.py`, `oanda_trade.py`, `technicals.py`, `settings.py`, `timing.py`, `utils.py`, `runner.py`. `defs.py` now only holds `BUY`/`SELL`/`NONE`.
 
-- Pair names use OANDA format (`EUR_USD`). The test universe is the currencies `"GBP,EUR,USD,CAD,JPY,NZD,CHF"`. They are expanded into all `A_B` combinations that exist in `instruments.pkl`, which gives 21 pairs. See `Instrument.get_pairs_from_string`; `ma_sim.py` and `inside_bar_sim.py` each keep their own duplicate `get_test_pairs`.
-- Candle DataFrames come from `OandaAPI.candles_to_df`. Their columns are `time`, `volume` and `{mid,bid,ask}_{o,h,l,c}` (WebDash fetches `mid` only). Incomplete candles are dropped and `time` is parsed to a tz-aware UTC datetime.
-- Direction and signal values are `BUY = 1`, `SELL = -1`, `NONE = 0`. They are multiplied by `units` to get the signed order size.
-- `Instrument.pipLocation` is stored as `10 ** pipLocation` (for example `-4` becomes `0.0001`). `ma_sim` measures gains in pips. `inside_bar_sim` measures gains as multiples of the stop distance (TP/SL = 0.8/0.4, so a win scores +2 and a loss −1).
+## Research scripts (repo root)
 
-## Data flow (root)
+These were not containerized yet; they target Python 3.11 and pandas 1.5.x. `ma_excel.py` calls `ExcelWriter.save()`, which was removed in pandas 2.0. The committed `venv/` folders point at another machine (`C:\Users\Mathew\...`) and don't work. Every script uses paths relative to its own directory.
 
-`instrument.ipynb` / `OandaAPI.save_instruments()` → `instruments.pkl` → `collect_his_data.py` → `his_data/*.pkl` → `ma_sim.py` / `inside_bar_sim.py` / notebooks.
-The current `his_data/*.pkl` files store `time` as tz-aware datetimes (since commit #45). `ma_sim.py`, `candle_plot.ipynb` and `inside_bar_timings*.ipynb` predate that change and call `dateutil.parse()` on `time`, which fails on these files. `inside_bar_sim.py` works with the current format.
-`inside_bar_explore*.ipynb` writes `USD_JPY_H4_trades.pkl`, which `inside_bar_timings*.ipynb` reads. `ma_sim_explorer.ipynb` and `candle_plot.ipynb` read the `ma_sim` output pickles. The `*_spread` notebook variants use bid/ask prices instead of mid.
+- `python collect_his_data.py` downloads M5, H1 and H4 candles for 2020-01-01 to 2022-12-31 into `his_data/{PAIR}_{GRAN}.pkl`, in 2000-candle chunks. It needs `instruments.pkl`, from `OandaAPI().save_instruments()` or `instrument.ipynb`.
+- `ma_sim.py` runs the MA grid search and writes `ma_test_res.pkl`, `all_trades.pkl` and `ma_results.xlsx`. `inside_bar_sim.py` replays H4 inside-bar signals on M5 bid/ask prices. Notebooks import `utils`, `instrument` and `defs` from the root.
+- Pair names use OANDA format. The test universe is the currencies `"GBP,EUR,USD,CAD,JPY,NZD,CHF"`, expanded into the 21 `A_B` pairs that exist in `instruments.pkl` (`Instrument.get_pairs_from_string`).
+- Candle frames come from `OandaAPI.candles_to_df`: `time`, `volume`, `{mid,bid,ask}_{o,h,l,c}`. `Instrument.pipLocation` is stored as `10 ** pipLocation`.
+- The current `his_data/*.pkl` files store `time` as tz-aware datetimes (since #45). `ma_sim.py`, `candle_plot.ipynb` and `inside_bar_timings*.ipynb` call `dateutil.parse()` on it, which fails on these files.
+- `inside_bar_explore*.ipynb` writes `USD_JPY_H4_trades.pkl`, which `inside_bar_timings*.ipynb` reads.
+- The root and `WebDashStarter` `defs.py` still hardcode an OANDA key.
 
-## Live bot architecture (TradingBotStarter)
+## Web dashboard (WebDashStarter)
 
-`TradingBot.run()` polls every 10 seconds:
-1. `update_timings()`: for each pair in `settings.json`, a `Timing` object tracks the last complete M1 candle time and sets `ready` when a newer one appears.
-2. `process_pairs()`: for each ready pair, `Technicals.get_trade_decision()` fetches `long_ma + 2` candles. It rejects the batch if the last candle's time doesn't match the expected candle, then computes the short/long MA cross and returns BUY, SELL or NONE.
-3. `TradeManager.place_trades()`: for each pair with a signal, it **closes every open trade on that pair**, then opens a new market order (FOK). The bot is therefore always in the market and reverses on each cross.
+It needs two processes: `python run_tasks.py`, which regenerates `data.json` every minute, and `flask run`, configured by `.env`.
 
-Per-pair parameters (`units`, `short_ma`, `long_ma`) live in `settings.json`. Logs go to `./logs/Bot.log`, `Technicals.log` and `Trade.log`. They are opened with mode `"w"`, so each start overwrites them.
+- `data_prep.py` computes MACD cross, Bollinger signal, EMA 8/20/50 trend and candle patterns on the last 100 M1 candles per pair, and writes the last row per pair to `data.json`.
+- `app.py` serves `/kpi_data`, `/price_data/<pair>` (50 M5 candles) and `static/` via WhiteNoise.
+- `DF_COLS` must match the `item.<FIELD>` bindings in `static/index.html`.
+- Pattern cells never highlight: the fields are booleans, but `applyDirectionClass()` only matches `1`/`-1`. `applyOnOffClass()` exists but is unused.
+- `static/data.json` is an unused empty file.
 
-Quirks in `TradingBotStarter/oanda_api.py` that affect behaviour:
-- `fetch_candles` ignores its `count` argument and always requests 10 candles. As a result `long_ma` above ~8 never yields both MA values, and the bot never trades.
-- `place_trade` returns `None` on HTTP failure but a `(trade_id, ok)` tuple on success. `TradeManager.create_trades` treats the return value as a bare trade id.
-- `make_request` writes `added_headers` into the module-level `defs.SECURE_HEADER` dict, which changes it for every later request.
+## Git hygiene
 
-## Web dashboard architecture (WebDashStarter)
-
-- `data_prep.py` fetches 100 M1 candles for each pair in `PAIRS`. It applies MACD cross, Bollinger signal, EMA 8/20/50 trend and candle patterns (hammer, doji, marubozu, spinning top, engulfing), then writes the **last row** for each pair to `WebDashStarter/data.json`. The thresholds are module constants. The logic was prototyped in the root `candle_indicators.ipynb` and `candle_patterns.ipynb`.
-- `app.py` serves three things: `GET /kpi_data` returns `data.json` as written; `GET /price_data/<pair>` returns 50 live M5 candles as column lists for Plotly; and WhiteNoise serves `static/`.
-- `static/app.js` is a Vue 2 app with Plotly, both loaded from CDN with no build step. It polls `/kpi_data` every 15 seconds and draws a candlestick chart when you click a row. The column names in `DF_COLS` must match the `item.<FIELD>` bindings in `static/index.html`.
-- `static/data.json` is an empty, unused file. The live file is `WebDashStarter/data.json`.
-- The candle-pattern fields are booleans, but `index.html` binds them through `applyDirectionClass()`, which only matches `1`/`-1`. As a result those cells never highlight; `applyOnOffClass()` exists in `app.js` but is unused.
+`.gitignore` covers `.env`, `__pycache__/` and `TradingBotStarter/logs/`. Files tracked before it existed (`venv/`, `__pycache__/`, old logs, pickles) are still in the index. Avoid `git add -A`; stage files explicitly.
